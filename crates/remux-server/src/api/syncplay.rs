@@ -8,7 +8,7 @@ use remux_macros::{get, post};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::{AppState, ResultExt, db::auth, syncplay::GroupInfo};
+use crate::{AppState, OptionExt, db::auth, syncplay::GroupInfo};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
