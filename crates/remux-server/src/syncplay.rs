@@ -15,11 +15,20 @@ pub struct GroupInfo {
     pub participants: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupQueue {
+    pub item_ids: Vec<Uuid>,
+    pub playing_index: usize,
+    pub position_ticks: i64,
+}
+
 #[derive(Debug)]
 struct Group {
     id: Uuid,
     name: String,
     members: HashSet<String>,
+	queue: Option<GroupQueue>,
+
 }
 
 impl Group {
@@ -62,6 +71,7 @@ impl SyncPlayManager {
             id,
             name,
             members: HashSet::from([device_id.to_owned()]),
+			queue: None,
         };
         let info = group.info();
 
@@ -100,6 +110,51 @@ impl SyncPlayManager {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         leave_locked(&mut inner, device_id);
     }
+	
+	pub fn set_new_queue(
+		&self,
+		device_id: &str,
+		item_ids: Vec<Uuid>,
+		playing_index: usize,
+		position_ticks: i64,
+	) -> Result<(Uuid, GroupQueue), &'static str> {
+		if item_ids.is_empty() {
+			return Err("queue cannot be empty");
+		}
+		if playing_index >= item_ids.len() {
+			return Err("playing index is outside the queue");
+		}
+		if position_ticks < 0 {
+			return Err("start position cannot be negative");
+		}
+
+		let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+		let group_id = *inner
+			.device_groups
+			.get(device_id)
+			.ok_or("device is not in a SyncPlay group")?;
+
+		let group = inner
+			.groups
+			.get_mut(&group_id)
+			.ok_or("SyncPlay group no longer exists")?;
+
+		let queue = GroupQueue {
+			item_ids,
+			playing_index,
+			position_ticks,
+		};
+		group.queue = Some(queue.clone());
+
+		Ok((group_id, queue))
+	}
+
+	pub fn queue_for_device(&self, device_id: &str) -> Option<(Uuid, GroupQueue)> {
+		let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+		let group_id = *inner.device_groups.get(device_id)?;
+		let queue = inner.groups.get(&group_id)?.queue.clone()?;
+		Some((group_id, queue))
+	}
 }
 
 fn leave_locked(inner: &mut Inner, device_id: &str) {
@@ -138,4 +193,22 @@ mod tests {
         manager.leave("friend");
         assert!(manager.list().is_empty());
     }
+	
+	#[test]
+	fn only_group_members_can_set_a_valid_queue() {
+		let manager = SyncPlayManager::new();
+		let group = manager.create("host", "Test".to_owned());
+		let episode = Uuid::new_v4();
+
+		assert!(manager.set_new_queue("outsider", vec![episode], 0, 0).is_err());
+		assert!(manager.set_new_queue("host", vec![episode], 1, 0).is_err());
+
+		let (group_id, queue) = manager
+			.set_new_queue("host", vec![episode], 0, 1_000)
+			.unwrap();
+
+		assert_eq!(group_id, group.group_id);
+		assert_eq!(queue.item_ids, vec![episode]);
+		assert_eq!(manager.queue_for_device("host"), Some((group_id, queue)));
+	}
 }

@@ -22,6 +22,48 @@ pub struct JoinGroupRequest {
     group_id: Uuid,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct SetNewQueueRequest {
+    playing_queue: Vec<Uuid>,
+    playing_item_position: usize,
+    start_position_ticks: i64,
+}
+
+#[post("/syncplay/setnewqueue")]
+pub async fn set_new_queue(
+    State(state): State<AppState>,
+    session: auth::AuthSession,
+    Json(body): Json<SetNewQueueRequest>,
+) -> Result<StatusCode> {
+    match state.ctx.syncplay.set_new_queue(
+        &session.device.id,
+        body.playing_queue,
+        body.playing_item_position,
+        body.start_position_ticks,
+    ) {
+        Ok((group_id, queue)) => {
+            tracing::info!(
+                %group_id,
+                device_id = %session.device.id,
+                item_id = %queue.item_ids[queue.playing_index],
+                queue_length = queue.item_ids.len(),
+                position_ticks = queue.position_ticks,
+                "SyncPlay group queue updated"
+            );
+            Ok(StatusCode::NO_CONTENT)
+        }
+        Err(reason) => {
+            tracing::warn!(
+                device_id = %session.device.id,
+                %reason,
+                "SyncPlay SetNewQueue rejected"
+            );
+            Ok(StatusCode::BAD_REQUEST)
+        }
+    }
+}
+
 #[post("/syncplay/new")]
 pub async fn create_group(
     State(state): State<AppState>,
