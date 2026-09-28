@@ -1,0 +1,17 @@
+name: Publish fork to GHCR
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    uses: ./.github/workflows/build.yml
+    with:
+      version: fork
+      docker_tags: '-t ghcr.io/sharipol/remux-with-syncplay:latest'
+      desktop: false
+    secrets: inherit
