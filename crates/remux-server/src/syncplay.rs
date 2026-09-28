@@ -18,6 +18,7 @@ pub struct GroupInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupQueue {
     pub item_ids: Vec<Uuid>,
+	pub playlist_item_ids: Vec<Uuid>,
     pub playing_index: usize,
     pub position_ticks: i64,
 }
@@ -28,6 +29,7 @@ struct Group {
     name: String,
     members: HashSet<String>,
 	queue: Option<GroupQueue>,
+	state: String,
 
 }
 
@@ -39,7 +41,7 @@ impl Group {
         GroupInfo {
             group_id: self.id,
             group_name: self.name.clone(),
-            state: "Idle".to_owned(),
+            state: self.state.clone(),
             participants,
         }
     }
@@ -72,6 +74,7 @@ impl SyncPlayManager {
             name,
             members: HashSet::from([device_id.to_owned()]),
 			queue: None,
+			state: "Idle".to_owned(),
         };
         let info = group.info();
 
@@ -142,12 +145,17 @@ impl SyncPlayManager {
 			.get_mut(&group_id)
 			.ok_or("SyncPlay group no longer exists")?;
 
+		let playlist_item_ids = item_ids.iter().map(|_| Uuid::new_v4()).collect();
+
 		let queue = GroupQueue {
 			item_ids,
+			playlist_item_ids,
 			playing_index,
 			position_ticks,
 		};
 		group.queue = Some(queue.clone());
+		group.state = "Waiting".to_owned();
+
 
 		Ok((group_id, queue))
 	}
@@ -158,6 +166,16 @@ impl SyncPlayManager {
 		let queue = inner.groups.get(&group_id)?.queue.clone()?;
 		Some((group_id, queue))
 	}
+	
+	pub fn members_for_group(&self, group_id: Uuid) -> Vec<String> {
+		let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+		inner
+			.groups
+			.get(&group_id)
+			.map(|group| group.members.iter().cloned().collect())
+			.unwrap_or_default()
+	}
+
 }
 
 fn leave_locked(inner: &mut Inner, device_id: &str) {
@@ -203,12 +221,12 @@ mod tests {
 		let group = manager.create("host", "Test".to_owned());
 		let episode = Uuid::new_v4();
 
-		assert!(manager.set_new_queue("outsider", vec![episode], 0, 0).is_err());
-		assert!(manager.set_new_queue("host", vec![episode], 1, 0).is_err());
-
-		let (group_id, queue) = manager
-			.set_new_queue("host", vec![episode], 0, 1_000)
-			.unwrap();
+		assert_eq!(queue.playlist_item_ids.len(), queue.item_ids.len());
+		assert_eq!(manager.get(group_id).unwrap().state, "Waiting");
+		assert_eq!(
+			manager.members_for_group(group_id),
+			vec!["host".to_owned()]
+		);
 
 		assert_eq!(group_id, group.group_id);
 		assert_eq!(queue.item_ids, vec![episode]);

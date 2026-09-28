@@ -7,8 +7,10 @@ use http::StatusCode;
 use remux_macros::{get, post};
 use serde::Deserialize;
 use uuid::Uuid;
+use serde_json::json;
 
-use crate::{AppState, OptionExt, db::auth, syncplay::GroupInfo};
+use crate::{ AppState, OptionExt, db::auth, syncplay::GroupInfo, ws::WsEvent,};
+
 
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -43,6 +45,52 @@ pub async fn set_new_queue(
         body.start_position_ticks,
     ) {
         Ok((group_id, queue)) => {
+			let playlist: Vec<_> = queue
+				.item_ids
+				.iter()
+				.zip(&queue.playlist_item_ids)
+				.map(|(item_id, playlist_item_id)| {
+					json!({
+						"ItemId": item_id.to_string(),
+						"PlaylistItemId": playlist_item_id.to_string(),
+					})
+				})
+				.collect();
+
+			let state_update = json!({
+				"GroupId": group_id.to_string(),
+				"Type": "StateUpdate",
+				"Data": {
+					"State": "Waiting",
+					"Reason": "NewPlaylist",
+				},
+			});
+
+			let queue_update = json!({
+				"GroupId": group_id.to_string(),
+				"Type": "PlayQueue",
+				"Data": {
+					"Reason": "NewPlaylist",
+					"LastUpdate": "",
+					"Playlist": playlist,
+					"PlayingItemIndex": queue.playing_index,
+					"StartPositionTicks": queue.position_ticks,
+					"IsPlaying": true,
+					"ShuffleMode": "Sorted",
+					"RepeatMode": "RepeatNone",
+				},
+			});
+
+			for device_id in state.ctx.syncplay.members_for_group(group_id) {
+				let _ = state.ctx.ws_tx.send(WsEvent::SyncPlayGroupUpdate {
+					device_id: device_id.clone(),
+					data: state_update.clone(),
+				});
+				let _ = state.ctx.ws_tx.send(WsEvent::SyncPlayGroupUpdate {
+					device_id,
+					data: queue_update.clone(),
+				});
+			}
             tracing::info!(
                 %group_id,
                 device_id = %session.device.id,
