@@ -11,7 +11,6 @@ use serde_json::json;
 
 use crate::{ AppState, OptionExt, db::auth, syncplay::GroupInfo, ws::WsEvent,};
 
-
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct NewGroupRequest {
@@ -44,6 +43,79 @@ pub struct ReadyRequest {
     _is_playing: Option<bool>,
 }
 
+fn broadcast_playback_command(
+    state: &AppState,
+    group_id: Uuid,
+    playlist_item_id: Uuid,
+    position_ticks: i64,
+    members: Vec<String>,
+    group_state: &str,
+    command_name: &str,
+    when: chrono::DateTime<chrono::Utc>,
+) {
+    let emitted_at = chrono::Utc::now();
+    let state_update = json!({
+        "GroupId": group_id.to_string(),
+        "Type": "StateUpdate",
+        "Data": { "State": group_state },
+    });
+    let command = json!({
+        "GroupId": group_id.to_string(),
+        "Command": command_name,
+        "PositionTicks": position_ticks,
+        "When": when.to_rfc3339(),
+        "EmittedAt": emitted_at.to_rfc3339(),
+        "PlaylistItemId": playlist_item_id.to_string(),
+    });
+
+    for device_id in members {
+        let _ = state.ctx.ws_tx.send(WsEvent::SyncPlayGroupUpdate {
+            device_id: device_id.clone(),
+            data: state_update.clone(),
+        });
+        let _ = state.ctx.ws_tx.send(WsEvent::SyncPlayCommand {
+            device_id,
+            data: command.clone(),
+        });
+    }
+}
+
+#[post("/syncplay/pause")]
+pub async fn pause(
+    State(state): State<AppState>,
+    session: auth::AuthSession,
+) -> Result<StatusCode> {
+    let now = chrono::Utc::now();
+    let Ok((group_id, item_id, position, members)) =
+        state.ctx.syncplay.pause(&session.device.id, now)
+    else {
+        return Ok(StatusCode::CONFLICT);
+    };
+
+    broadcast_playback_command(
+        &state, group_id, item_id, position, members, "Paused", "Pause", now,
+    );
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[post("/syncplay/unpause")]
+pub async fn unpause(
+    State(state): State<AppState>,
+    session: auth::AuthSession,
+) -> Result<StatusCode> {
+    let when = chrono::Utc::now() + chrono::Duration::milliseconds(750);
+    let Ok((group_id, item_id, position, members)) =
+        state.ctx.syncplay.unpause(&session.device.id, when)
+    else {
+        return Ok(StatusCode::CONFLICT);
+    };
+
+    broadcast_playback_command(
+        &state, group_id, item_id, position, members, "Playing", "Unpause", when,
+    );
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[post("/syncplay/ready")]
 pub async fn ready(
     State(state): State<AppState>,
@@ -71,6 +143,15 @@ pub async fn ready(
 
     let emitted_at = chrono::Utc::now();
     let when = emitted_at + chrono::Duration::milliseconds(750);
+	
+	if let Err(reason) = state
+		.ctx
+		.syncplay
+		.record_play_start(group_id, playlist_item_id, when)
+	{
+		tracing::warn!(%group_id, %reason, "SyncPlay play start not recorded");
+		return Ok(StatusCode::CONFLICT);
+	}
 
     let state_update = serde_json::json!({
         "GroupId": group_id.to_string(),

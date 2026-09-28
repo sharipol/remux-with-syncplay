@@ -31,6 +31,7 @@ struct Group {
 	queue: Option<GroupQueue>,
 	state: String,
 	ready_members: HashSet<String>,
+	play_started_at: Option<chrono::DateTime<chrono::Utc>>,
 
 }
 
@@ -77,6 +78,7 @@ impl SyncPlayManager {
 			queue: None,
 			state: "Idle".to_owned(),
 			ready_members: HashSet::new(),
+			play_started_at: None,
         };
         let info = group.info();
 
@@ -161,6 +163,7 @@ impl SyncPlayManager {
 		group.queue = Some(queue.clone());
 		group.state = "Waiting".to_owned();
 		group.ready_members.clear();
+		group.play_started_at = None;
 
 
 		Ok((group_id, queue))
@@ -226,6 +229,85 @@ impl SyncPlayManager {
 			queue.position_ticks,
 			members,
 		)))
+	}
+	
+	pub fn record_play_start(
+		&self,
+		group_id: Uuid,
+		playlist_item_id: Uuid,
+		when: chrono::DateTime<chrono::Utc>,
+	) -> Result<(), &'static str> {
+		let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+		let group = inner.groups.get_mut(&group_id).ok_or("group not found")?;
+		let queue = group.queue.as_ref().ok_or("group has no queue")?;
+
+		if group.state != "Playing"
+			|| queue.playlist_item_ids[queue.playing_index] != playlist_item_id
+		{
+			return Err("group is no longer starting that item");
+		}
+
+		group.play_started_at = Some(when);
+		Ok(())
+	}
+
+	pub fn pause(
+		&self,
+		device_id: &str,
+		now: chrono::DateTime<chrono::Utc>,
+	) -> Result<(Uuid, Uuid, i64, Vec<String>), &'static str> {
+		let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+		let group_id = *inner
+			.device_groups
+			.get(device_id)
+			.ok_or("device is not in a SyncPlay group")?;
+		let group = inner.groups.get_mut(&group_id).ok_or("group not found")?;
+
+		if group.state != "Playing" {
+			return Err("group is not playing");
+		}
+
+		let queue = group.queue.as_mut().ok_or("group has no queue")?;
+		let playlist_item_id = queue.playlist_item_ids[queue.playing_index];
+
+		if let Some(started_at) = group.play_started_at {
+			let elapsed_ms = (now - started_at).num_milliseconds().max(0);
+			queue.position_ticks = queue
+				.position_ticks
+				.saturating_add(elapsed_ms.saturating_mul(10_000));
+		}
+
+		group.play_started_at = None;
+		group.state = "Paused".to_owned();
+		let members = group.members.iter().cloned().collect();
+
+		Ok((group_id, playlist_item_id, queue.position_ticks, members))
+	}
+
+	pub fn unpause(
+		&self,
+		device_id: &str,
+		when: chrono::DateTime<chrono::Utc>,
+	) -> Result<(Uuid, Uuid, i64, Vec<String>), &'static str> {
+		let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+		let group_id = *inner
+			.device_groups
+			.get(device_id)
+			.ok_or("device is not in a SyncPlay group")?;
+		let group = inner.groups.get_mut(&group_id).ok_or("group not found")?;
+
+		if group.state != "Paused" {
+			return Err("group is not paused");
+		}
+
+		let queue = group.queue.as_ref().ok_or("group has no queue")?;
+		let playlist_item_id = queue.playlist_item_ids[queue.playing_index];
+		let position_ticks = queue.position_ticks;
+		group.play_started_at = Some(when);
+		group.state = "Playing".to_owned();
+		let members = group.members.iter().cloned().collect();
+
+		Ok((group_id, playlist_item_id, position_ticks, members))
 	}
 
 }
@@ -322,5 +404,32 @@ mod tests {
 		assert_eq!(members.len(), 2);
 		assert_eq!(manager.get(group_id).unwrap().state, "Playing");
 		assert_eq!(manager.mark_ready("host", &playlist_item_id).unwrap(), None);
+	}
+	
+	#[test]
+	fn pause_uses_elapsed_playback_position_and_unpause_keeps_it() {
+		let manager = SyncPlayManager::new();
+		let group = manager.create("host", "Test".to_owned());
+		let (_, queue) = manager
+			.set_new_queue("host", vec![Uuid::new_v4()], 0, 10_000)
+			.unwrap();
+
+		let item_id = queue.playlist_item_ids[0];
+		manager.mark_ready("host", &item_id.to_string()).unwrap();
+
+		let start = chrono::Utc::now();
+		manager
+			.record_play_start(group.group_id, item_id, start)
+			.unwrap();
+
+		let paused_at = start + chrono::Duration::seconds(5);
+		let (_, _, paused_position, _) = manager.pause("host", paused_at).unwrap();
+		assert_eq!(paused_position, 50_010_000);
+		assert_eq!(manager.get(group.group_id).unwrap().state, "Paused");
+
+		let resume_at = paused_at + chrono::Duration::seconds(10);
+		let (_, _, resumed_position, _) = manager.unpause("host", resume_at).unwrap();
+		assert_eq!(resumed_position, paused_position);
+		assert_eq!(manager.get(group.group_id).unwrap().state, "Playing");
 	}
 }
