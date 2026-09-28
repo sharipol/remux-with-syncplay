@@ -97,6 +97,9 @@ impl SyncPlayManager {
         if !inner.groups.contains_key(&id) {
             return None;
         }
+		if inner.device_groups.get(device_id) == Some(&id) {
+			return inner.groups.get(&id).map(Group::info);
+		}
 
         leave_locked(&mut inner, device_id);
         let group = inner.groups.get_mut(&id)?;

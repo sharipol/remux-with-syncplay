@@ -35,6 +35,8 @@ pub enum SessionMessageType {
     SessionsStart,
     SessionsStop,
     KeepAlive,
+	SyncPlayCommand,
+	SyncPlayGroupUpdate,
     #[serde(other)]
     Other,
 }
@@ -96,6 +98,14 @@ pub enum WsEvent {
         device_id: String,
         data: serde_json::Value,
     },
+	SyncPlayCommand {
+    device_id: String,
+    data: serde_json::Value,
+	},
+	SyncPlayGroupUpdate {
+		device_id: String,
+		data: serde_json::Value,
+	},
 }
 
 pub async fn ws_handler(
@@ -224,6 +234,33 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, session: AuthSess
                             return;
                         }
                     }
+					Ok(WsEvent::SyncPlayCommand { device_id, data })
+						if device_id == my_device_id =>
+					{
+						if !send_msg(
+							&mut socket,
+							SessionMessageType::SyncPlayCommand,
+							Some(data),
+						)
+						.await
+						{
+							return;
+						}
+					}
+					Ok(WsEvent::SyncPlayGroupUpdate { device_id, data })
+						if device_id == my_device_id =>
+					{
+						if !send_msg(
+							&mut socket,
+							SessionMessageType::SyncPlayGroupUpdate,
+							Some(data),
+						)
+						.await
+						{
+							return;
+						}
+					}
+					Ok(WsEvent::SyncPlayCommand { .. } | WsEvent::SyncPlayGroupUpdate { .. }) => {}
                     Ok(WsEvent::RemotePlay { device_id, data }) if device_id == my_device_id => {
                         info!(device_id = %device_id, "delivering Play to WS client");
                         if !send_msg(&mut socket, SessionMessageType::Play, Some(data)).await {
@@ -426,4 +463,30 @@ mod tests {
                 .to_string()
         );
     }
+	
+	#[test]
+	fn syncplay_messages_use_expected_websocket_envelope() {
+		let group_id = Uuid::new_v4();
+		let value = serde_json::to_value(OutboundMessage {
+			message_type: SessionMessageType::SyncPlayGroupUpdate,
+			message_id: Uuid::new_v4(),
+			data: Some(serde_json::json!({
+				"GroupId": group_id.to_string(),
+			})),
+		})
+		.unwrap();
+
+		assert_eq!(value["MessageType"], "SyncPlayGroupUpdate");
+		assert_eq!(value["Data"]["GroupId"], group_id.to_string());
+		assert!(value["MessageId"].is_string());
+
+		let command = serde_json::to_value(OutboundMessage {
+			message_type: SessionMessageType::SyncPlayCommand,
+			message_id: Uuid::new_v4(),
+			data: Some(serde_json::json!({})),
+		})
+		.unwrap();
+
+		assert_eq!(command["MessageType"], "SyncPlayCommand");
+	}
 }
