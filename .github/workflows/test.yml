@@ -25,5 +25,8 @@ jobs:
         with:
           key: test
 
+      - name: Run SyncPlay tests
+        run: cargo test -p remux-server syncplay --lib -- --nocapture
+
       - name: Run tests
         run: cargo test -p remux-server
