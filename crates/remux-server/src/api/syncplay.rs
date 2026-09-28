@@ -32,6 +32,79 @@ pub struct SetNewQueueRequest {
     start_position_ticks: i64,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ReadyRequest {
+    playlist_item_id: String,
+    #[serde(default)]
+    _when: Option<String>,
+    #[serde(default)]
+    _position_ticks: Option<i64>,
+    #[serde(default)]
+    _is_playing: Option<bool>,
+}
+
+#[post("/syncplay/ready")]
+pub async fn ready(
+    State(state): State<AppState>,
+    session: auth::AuthSession,
+    Json(body): Json<ReadyRequest>,
+) -> Result<StatusCode> {
+    let result = state
+        .ctx
+        .syncplay
+        .mark_ready(&session.device.id, &body.playlist_item_id);
+
+    let Some((group_id, playlist_item_id, position_ticks, members)) = (match result {
+        Ok(value) => value,
+        Err(reason) => {
+            tracing::warn!(
+                device_id = %session.device.id,
+                %reason,
+                "SyncPlay Ready rejected"
+            );
+            return Ok(StatusCode::BAD_REQUEST);
+        }
+    }) else {
+        return Ok(StatusCode::NO_CONTENT);
+    };
+
+    let emitted_at = chrono::Utc::now();
+    let when = emitted_at + chrono::Duration::milliseconds(750);
+
+    let state_update = serde_json::json!({
+        "GroupId": group_id.to_string(),
+        "Type": "StateUpdate",
+        "Data": {
+            "State": "Playing",
+            "Reason": "AllReady",
+        },
+    });
+
+    let command = serde_json::json!({
+        "GroupId": group_id.to_string(),
+        "Command": "Unpause",
+        "PositionTicks": position_ticks,
+        "When": when.to_rfc3339(),
+        "EmittedAt": emitted_at.to_rfc3339(),
+        "PlaylistItemId": playlist_item_id.to_string(),
+    });
+
+    for device_id in members {
+        let _ = state.ctx.ws_tx.send(WsEvent::SyncPlayGroupUpdate {
+            device_id: device_id.clone(),
+            data: state_update.clone(),
+        });
+        let _ = state.ctx.ws_tx.send(WsEvent::SyncPlayCommand {
+            device_id,
+            data: command.clone(),
+        });
+    }
+
+    tracing::info!(%group_id, "SyncPlay group ready; Unpause sent");
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[post("/syncplay/setnewqueue")]
 pub async fn set_new_queue(
     State(state): State<AppState>,
