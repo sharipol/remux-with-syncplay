@@ -107,12 +107,14 @@ impl SyncPlayManager {
 		}
 
         leave_locked(&mut inner, device_id);
-        let group = inner.groups.get_mut(&id)?;
-        group.members.insert(device_id.to_owned());
-        let info = group.info();
-        inner.device_groups.insert(device_id.to_owned(), id);
+
+		let group = inner.groups.get_mut(&id)?;
+		group.members.insert(device_id.to_owned());
 		group.ready_members.remove(device_id);
-        Some(info)
+
+		let info = group.info();
+		inner.device_groups.insert(device_id.to_owned(), id);
+		Some(info)
     }
 
     pub fn leave(&self, device_id: &str) {
