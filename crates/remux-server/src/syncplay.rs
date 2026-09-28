@@ -221,6 +221,13 @@ mod tests {
 		let group = manager.create("host", "Test".to_owned());
 		let episode = Uuid::new_v4();
 
+		assert!(manager.set_new_queue("outsider", vec![episode], 0, 0).is_err());
+		assert!(manager.set_new_queue("host", vec![episode], 1, 0).is_err());
+
+		let (group_id, queue) = manager
+			.set_new_queue("host", vec![episode], 0, 1_000)
+			.unwrap();
+
 		assert_eq!(queue.playlist_item_ids.len(), queue.item_ids.len());
 		assert_eq!(manager.get(group_id).unwrap().state, "Waiting");
 		assert_eq!(
