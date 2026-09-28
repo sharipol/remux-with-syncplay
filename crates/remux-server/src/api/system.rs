@@ -388,7 +388,6 @@ pub async fn system_endpoint(
     })))
 }
 
-#[get("/syncplay/list")]
 pub async fn syncplay_list(
     State(_state): State<AppState>,
     _session: auth::AuthSession,

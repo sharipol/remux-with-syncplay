@@ -73,6 +73,7 @@ mod web_client;
 mod web_patches;
 mod web_transform;
 mod ws;
+mod syncplay;
 
 /// Paths to web assets served from the filesystem (non-desktop builds).
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -371,6 +372,7 @@ pub async fn init_app(
         addons,
         signals,
         started_at: Utc::now(),
+		syncplay: Arc::new(syncplay::SyncPlayManager::new()),
     };
     ctx.signals
         .register(services::media_tracker::MediaTrackerSubscriber { ctx: ctx.clone() });
@@ -491,6 +493,7 @@ pub struct AppContext {
     pub signals: signals::Signals,
     /// When this server process started.
     pub started_at: chrono::DateTime<chrono::Utc>,
+	pub syncplay: Arc<syncplay::SyncPlayManager>,
 }
 
 impl AppContext {

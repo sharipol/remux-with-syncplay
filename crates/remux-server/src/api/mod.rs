@@ -32,6 +32,7 @@ pub mod startup;
 pub mod stream;
 pub mod stream_group;
 pub mod subtitles;
+pub mod syncplay;
 pub mod system;
 pub mod tasks;
 pub mod users;
