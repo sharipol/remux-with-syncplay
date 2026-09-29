@@ -254,7 +254,36 @@ pub async fn ready(
             return Ok(StatusCode::BAD_REQUEST);
         }
     }) else {
-        return Ok(StatusCode::NO_CONTENT);
+		let emitted_at = chrono::Utc::now();
+		let when = emitted_at + chrono::Duration::milliseconds(750);
+
+		if let Some((group_id, item_id, position_ticks)) =
+			state.ctx.syncplay.take_join_catchup(
+				&session.device.id,
+				&body.playlist_item_id,
+				when,
+			)
+		{
+			let _ = state.ctx.ws_tx.send(WsEvent::SyncPlayCommand {
+				device_id: session.device.id.clone(),
+				data: json!({
+					"GroupId": group_id.to_string(),
+					"Command": "Unpause",
+					"PositionTicks": position_ticks,
+					"When": when.to_rfc3339(),
+					"EmittedAt": emitted_at.to_rfc3339(),
+					"PlaylistItemId": item_id.to_string(),
+				}),
+			});
+			tracing::info!(
+				%group_id,
+				device_id = %session.device.id,
+				position_ticks,
+				"SyncPlay late join catch-up sent"
+			);
+		}
+
+		return Ok(StatusCode::NO_CONTENT);
     };
 
     let emitted_at = chrono::Utc::now();

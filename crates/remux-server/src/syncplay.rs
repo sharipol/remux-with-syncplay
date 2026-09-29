@@ -32,6 +32,7 @@ struct Group {
 	state: String,
 	ready_members: HashSet<String>,
 	play_started_at: Option<chrono::DateTime<chrono::Utc>>,
+	pending_catchup: HashSet<String>,
 
 }
 
@@ -96,6 +97,7 @@ impl SyncPlayManager {
 			state: "Idle".to_owned(),
 			ready_members: HashSet::new(),
 			play_started_at: None,
+			pending_catchup: HashSet::new(),
         };
         let info = group.info();
 
@@ -122,7 +124,11 @@ impl SyncPlayManager {
             return None;
         }
 		if inner.device_groups.get(device_id) == Some(&id) {
-			return inner.groups.get(&id).map(Group::info);
+			let group = inner.groups.get_mut(&id)?;
+			if group.state == "Playing" {
+				group.pending_catchup.insert(device_id.to_owned());
+			}
+			return Some(group.info());
 		}
 
         leave_locked(&mut inner, device_id);
@@ -130,6 +136,9 @@ impl SyncPlayManager {
 		let group = inner.groups.get_mut(&id)?;
 		group.members.insert(device_id.to_owned());
 		group.ready_members.remove(device_id);
+		if group.state == "Playing" {
+			group.pending_catchup.insert(device_id.to_owned());
+		}
 
 		let info = group.info();
 		inner.device_groups.insert(device_id.to_owned(), id);
@@ -180,6 +189,7 @@ impl SyncPlayManager {
 		group.queue = Some(queue.clone());
 		group.state = "Waiting".to_owned();
 		group.ready_members.clear();
+		group.pending_catchup.clear();
 		group.play_started_at = None;
 
 
@@ -455,6 +465,41 @@ impl SyncPlayManager {
 
 		Some((group.info(), queue))
 	}
+	
+	/// Consume a late joiner's one-time catch-up when it reports Ready.
+	pub fn take_join_catchup(
+		&self,
+		device_id: &str,
+		playlist_item_id: &str,
+		when: chrono::DateTime<chrono::Utc>,
+	) -> Option<(Uuid, Uuid, i64)> {
+		let requested_id = Uuid::parse_str(playlist_item_id).ok()?;
+
+		let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+		let group_id = *inner.device_groups.get(device_id)?;
+		let group = inner.groups.get_mut(&group_id)?;
+
+		if group.state != "Playing" || !group.pending_catchup.contains(device_id) {
+			return None;
+		}
+
+		let queue = group.queue.as_ref()?;
+		let current_id = queue.playlist_item_ids[queue.playing_index];
+		if requested_id != current_id {
+			return None;
+		}
+
+		let elapsed_ms = group
+			.play_started_at
+			.map(|started_at| (when - started_at).num_milliseconds().max(0))
+			.unwrap_or(0);
+		let target_ticks = queue
+			.position_ticks
+			.saturating_add(elapsed_ms.saturating_mul(10_000));
+
+		group.pending_catchup.remove(device_id);
+		Some((group_id, current_id, target_ticks))
+	}
 
 }
 
@@ -463,6 +508,7 @@ fn leave_locked(inner: &mut Inner, device_id: &str) {
         if let Some(group) = inner.groups.get_mut(&id) {
             group.members.remove(device_id);
 			group.ready_members.remove(device_id);
+			group.pending_catchup.remove(device_id);
             if group.members.is_empty() {
                 inner.groups.remove(&id);
             }
@@ -659,34 +705,69 @@ mod tests {
 	}
 	
 	#[test]
-fn late_join_gets_current_position_without_restarting_group() {
-    let manager = SyncPlayManager::new();
-    let group = manager.create("host", "Test".to_owned());
-    let episode = Uuid::new_v4();
+	fn late_join_gets_current_position_without_restarting_group() {
+		let manager = SyncPlayManager::new();
+		let group = manager.create("host", "Test".to_owned());
+		let episode = Uuid::new_v4();
 
-    let (_, queue) = manager
-        .set_new_queue("host", vec![episode], 0, 10_000)
-        .unwrap();
-    let item_id = queue.playlist_item_ids[0];
+		let (_, queue) = manager
+			.set_new_queue("host", vec![episode], 0, 10_000)
+			.unwrap();
+		let item_id = queue.playlist_item_ids[0];
 
-    manager.mark_ready("host", &item_id.to_string()).unwrap();
+		manager.mark_ready("host", &item_id.to_string()).unwrap();
 
-    let start = chrono::Utc::now();
-    manager.record_play_start(group.group_id, item_id, start).unwrap();
+		let start = chrono::Utc::now();
+		manager.record_play_start(group.group_id, item_id, start).unwrap();
 
-    manager.join("returning-tv", group.group_id).unwrap();
-    let (info, snapshot) = manager
-        .snapshot_for_device(
-            "returning-tv",
-            start + chrono::Duration::seconds(30),
-        )
-        .unwrap();
+		manager.join("returning-tv", group.group_id).unwrap();
+		let (info, snapshot) = manager
+			.snapshot_for_device(
+				"returning-tv",
+				start + chrono::Duration::seconds(30),
+			)
+			.unwrap();
 
-    assert_eq!(info.state, "Playing");
-    assert_eq!(snapshot.unwrap().position_ticks, 300_010_000);
-    assert_eq!(
-        manager.queue_for_device("host").unwrap().1.position_ticks,
-        10_000
-    );
-}
+		assert_eq!(info.state, "Playing");
+		assert_eq!(snapshot.unwrap().position_ticks, 300_010_000);
+		assert_eq!(
+			manager.queue_for_device("host").unwrap().1.position_ticks,
+			10_000
+		);
+	}
+	
+	#[test]
+	fn late_join_catchup_is_targeted_and_sent_only_once() {
+		let manager = SyncPlayManager::new();
+		let group = manager.create("host", "Test".to_owned());
+		let (_, queue) = manager
+			.set_new_queue("host", vec![Uuid::new_v4()], 0, 10_000)
+			.unwrap();
+		let item_id = queue.playlist_item_ids[0];
+
+		manager.mark_ready("host", &item_id.to_string()).unwrap();
+		let start = chrono::Utc::now();
+		manager.record_play_start(group.group_id, item_id, start).unwrap();
+
+		manager.join("returning-tv", group.group_id).unwrap();
+
+		let when = start + chrono::Duration::seconds(30);
+		assert!(manager
+			.take_join_catchup("returning-tv", &Uuid::new_v4().to_string(), when)
+			.is_none());
+
+		let (id, item, position) = manager
+			.take_join_catchup("returning-tv", &item_id.to_string(), when)
+			.unwrap();
+
+		assert_eq!(id, group.group_id);
+		assert_eq!(item, item_id);
+		assert_eq!(position, 300_010_000);
+		assert!(manager
+			.take_join_catchup("returning-tv", &item_id.to_string(), when)
+			.is_none());
+		assert!(manager
+			.take_join_catchup("host", &item_id.to_string(), when)
+			.is_none());
+	}
 }
