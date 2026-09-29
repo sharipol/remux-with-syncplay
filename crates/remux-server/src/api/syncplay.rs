@@ -67,6 +67,12 @@ pub struct BufferingRequest {
     _is_playing: Option<bool>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct SetIgnoreWaitRequest {
+    ignore_wait: bool,
+}
+
 fn broadcast_playback_command(
     state: &AppState,
     group_id: Uuid,
@@ -164,6 +170,55 @@ fn change_playlist_item(
     }
 
     StatusCode::NO_CONTENT
+}
+
+#[post("/syncplay/setignorewait")]
+pub async fn set_ignore_wait(
+    State(state): State<AppState>,
+    session: auth::AuthSession,
+    Json(body): Json<SetIgnoreWaitRequest>,
+) -> Result<StatusCode> {
+    let transition = match state
+        .ctx
+        .syncplay
+        .set_ignore_wait(&session.device.id, body.ignore_wait)
+    {
+        Ok(transition) => transition,
+        Err(reason) => {
+            tracing::warn!(
+                device_id = %session.device.id,
+                %reason,
+                "SyncPlay SetIgnoreWait rejected"
+            );
+            return Ok(StatusCode::BAD_REQUEST);
+        }
+    };
+
+    if let Some((group_id, item_id, position, members)) = transition {
+        let when = chrono::Utc::now() + chrono::Duration::milliseconds(750);
+
+        if let Err(reason) = state
+            .ctx
+            .syncplay
+            .record_play_start(group_id, item_id, when)
+        {
+            tracing::warn!(%group_id, %reason, "SyncPlay ignore-wait resume failed");
+            return Ok(StatusCode::CONFLICT);
+        }
+
+        broadcast_playback_command(
+            &state,
+            group_id,
+            item_id,
+            position,
+            members,
+            "Playing",
+            "Unpause",
+            when,
+        );
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[post("/syncplay/buffering")]
