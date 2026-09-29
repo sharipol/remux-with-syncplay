@@ -250,6 +250,11 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, session: AuthSess
 					Ok(WsEvent::SyncPlayGroupUpdate { device_id, data })
 						if device_id == my_device_id =>
 					{
+     tracing::info!(
+         device_id = %device_id,
+         update_type = ?data.get("Type"),
+         "delivering SyncPlay group update"
+     );
 						if !send_msg(
 							&mut socket,
 							SessionMessageType::SyncPlayGroupUpdate,
