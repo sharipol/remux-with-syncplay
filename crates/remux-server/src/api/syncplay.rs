@@ -475,6 +475,73 @@ pub async fn join_group(
         .syncplay
         .join(&session.device.id, body.group_id)
         .context_not_found("SyncPlay group not found")?;
+
+    let Some((info, queue)) = state
+        .ctx
+        .syncplay
+        .snapshot_for_device(&session.device.id, chrono::Utc::now())
+    else {
+        return Ok(StatusCode::CONFLICT);
+    };
+
+    let device_id = session.device.id.clone();
+    let group_id = info.group_id;
+
+    let _ = state.ctx.ws_tx.send(WsEvent::SyncPlayGroupUpdate {
+        device_id: device_id.clone(),
+        data: json!({
+            "GroupId": group_id.to_string(),
+            "Type": "GroupJoined",
+            "Data": info,
+        }),
+    });
+
+    if let Some(queue) = queue {
+        let playlist: Vec<_> = queue
+            .item_ids
+            .iter()
+            .zip(&queue.playlist_item_ids)
+            .map(|(item_id, playlist_item_id)| {
+                json!({
+                    "ItemId": item_id.to_string(),
+                    "PlaylistItemId": playlist_item_id.to_string(),
+                })
+            })
+            .collect();
+
+        let _ = state.ctx.ws_tx.send(WsEvent::SyncPlayGroupUpdate {
+            device_id,
+            data: json!({
+                "GroupId": group_id.to_string(),
+                "Type": "PlayQueue",
+                "Data": {
+                    "Reason": "NewPlaylist",
+                    "LastUpdate": chrono::Utc::now().to_rfc3339(),
+                    "Playlist": playlist,
+                    "PlayingItemIndex": queue.playing_index,
+                    "StartPositionTicks": queue.position_ticks,
+                    "IsPlaying": info.state == "Playing",
+                    "ShuffleMode": "Sorted",
+                    "RepeatMode": "RepeatNone",
+                },
+            }),
+        });
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[post("/syncplay/join")]
+pub async fn join_group(
+    State(state): State<AppState>,
+    session: auth::AuthSession,
+    Json(body): Json<JoinGroupRequest>,
+) -> Result<StatusCode> {
+    state
+        .ctx
+        .syncplay
+        .join(&session.device.id, body.group_id)
+        .context_not_found("SyncPlay group not found")?;
     Ok(StatusCode::NO_CONTENT)
 }
 

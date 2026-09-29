@@ -430,6 +430,31 @@ impl SyncPlayManager {
 		let members = group.members.iter().cloned().collect();
 		Ok((group_id, updated_queue, members))
 	}
+	
+	pub fn snapshot_for_device(
+		&self,
+		device_id: &str,
+		now: chrono::DateTime<chrono::Utc>,
+	) -> Option<(GroupInfo, Option<GroupQueue>)> {
+		let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+		let group_id = *inner.device_groups.get(device_id)?;
+		let group = inner.groups.get(&group_id)?;
+
+		let mut queue = group.queue.clone();
+
+		if group.state == "Playing" {
+			if let (Some(started_at), Some(ref mut queue)) =
+				(group.play_started_at, queue.as_mut())
+			{
+				let elapsed_ms = (now - started_at).num_milliseconds().max(0);
+				queue.position_ticks = queue
+					.position_ticks
+					.saturating_add(elapsed_ms.saturating_mul(10_000));
+			}
+		}
+
+		Some((group.info(), queue))
+	}
 
 }
 
@@ -632,4 +657,36 @@ mod tests {
 			.unwrap()
 			.is_some());
 	}
+	
+	#[test]
+fn late_join_gets_current_position_without_restarting_group() {
+    let manager = SyncPlayManager::new();
+    let group = manager.create("host", "Test".to_owned());
+    let episode = Uuid::new_v4();
+
+    let (_, queue) = manager
+        .set_new_queue("host", vec![episode], 0, 10_000)
+        .unwrap();
+    let item_id = queue.playlist_item_ids[0];
+
+    manager.mark_ready("host", &item_id.to_string()).unwrap();
+
+    let start = chrono::Utc::now();
+    manager.record_play_start(group.group_id, item_id, start).unwrap();
+
+    manager.join("returning-tv", group.group_id).unwrap();
+    let (info, snapshot) = manager
+        .snapshot_for_device(
+            "returning-tv",
+            start + chrono::Duration::seconds(30),
+        )
+        .unwrap();
+
+    assert_eq!(info.state, "Playing");
+    assert_eq!(snapshot.unwrap().position_ticks, 300_010_000);
+    assert_eq!(
+        manager.queue_for_device("host").unwrap().1.position_ticks,
+        10_000
+    );
+}
 }
