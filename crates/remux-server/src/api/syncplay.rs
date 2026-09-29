@@ -9,7 +9,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 use serde_json::json;
 
-use crate::{ AppState, OptionExt, db::auth, syncplay::GroupInfo, ws::WsEvent,};
+use crate::{ AppState, OptionExt, db::auth, syncplay::{GroupInfo, ItemChange}, ws::WsEvent,};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -41,6 +41,18 @@ pub struct ReadyRequest {
     _position_ticks: Option<i64>,
     #[serde(default)]
     _is_playing: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct SeekRequest {
+    position_ticks: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct PlaylistItemRequest {
+    playlist_item_id: String,
 }
 
 fn broadcast_playback_command(
@@ -78,6 +90,110 @@ fn broadcast_playback_command(
             data: command.clone(),
         });
     }
+}
+
+fn change_playlist_item(
+    state: &AppState,
+    device_id: &str,
+    requested_id: &str,
+    change: ItemChange,
+) -> StatusCode {
+    let Ok((group_id, queue, members)) =
+        state.ctx.syncplay.change_item(device_id, requested_id, change)
+    else {
+        return StatusCode::CONFLICT;
+    };
+
+    let playlist: Vec<_> = queue
+        .item_ids
+        .iter()
+        .zip(&queue.playlist_item_ids)
+        .map(|(item_id, playlist_item_id)| {
+            json!({
+                "ItemId": item_id.to_string(),
+                "PlaylistItemId": playlist_item_id.to_string(),
+            })
+        })
+        .collect();
+
+    let state_update = json!({
+        "GroupId": group_id.to_string(),
+        "Type": "StateUpdate",
+        "Data": {
+            "State": "Waiting",
+            "Reason": change.reason(),
+        },
+    });
+
+    let queue_update = json!({
+        "GroupId": group_id.to_string(),
+        "Type": "PlayQueue",
+        "Data": {
+            "Reason": change.reason(),
+            "LastUpdate": chrono::Utc::now().to_rfc3339(),
+            "Playlist": playlist,
+            "PlayingItemIndex": queue.playing_index,
+            "StartPositionTicks": 0,
+            "IsPlaying": true,
+            "ShuffleMode": "Sorted",
+            "RepeatMode": "RepeatNone",
+        },
+    });
+
+    for device_id in members {
+        let _ = state.ctx.ws_tx.send(WsEvent::SyncPlayGroupUpdate {
+            device_id: device_id.clone(),
+            data: state_update.clone(),
+        });
+        let _ = state.ctx.ws_tx.send(WsEvent::SyncPlayGroupUpdate {
+            device_id,
+            data: queue_update.clone(),
+        });
+    }
+
+    StatusCode::NO_CONTENT
+}
+
+#[post("/syncplay/nextitem")]
+pub async fn next_item(
+    State(state): State<AppState>,
+    session: auth::AuthSession,
+    Json(body): Json<PlaylistItemRequest>,
+) -> Result<StatusCode> {
+    Ok(change_playlist_item(
+        &state,
+        &session.device.id,
+        &body.playlist_item_id,
+        ItemChange::Next,
+    ))
+}
+
+#[post("/syncplay/previousitem")]
+pub async fn previous_item(
+    State(state): State<AppState>,
+    session: auth::AuthSession,
+    Json(body): Json<PlaylistItemRequest>,
+) -> Result<StatusCode> {
+    Ok(change_playlist_item(
+        &state,
+        &session.device.id,
+        &body.playlist_item_id,
+        ItemChange::Previous,
+    ))
+}
+
+#[post("/syncplay/setplaylistitem")]
+pub async fn set_playlist_item(
+    State(state): State<AppState>,
+    session: auth::AuthSession,
+    Json(body): Json<PlaylistItemRequest>,
+) -> Result<StatusCode> {
+    Ok(change_playlist_item(
+        &state,
+        &session.device.id,
+        &body.playlist_item_id,
+        ItemChange::Select,
+    ))
 }
 
 #[post("/syncplay/pause")]
@@ -183,6 +299,47 @@ pub async fn ready(
     }
 
     tracing::info!(%group_id, "SyncPlay group ready; Unpause sent");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[post("/syncplay/seek")]
+pub async fn seek(
+    State(state): State<AppState>,
+    session: auth::AuthSession,
+    Json(body): Json<SeekRequest>,
+) -> Result<StatusCode> {
+    let Ok((group_id, item_id, position, members, was_playing)) =
+        state.ctx.syncplay.seek(&session.device.id, body.position_ticks)
+    else {
+        return Ok(StatusCode::CONFLICT);
+    };
+
+    let now = chrono::Utc::now();
+
+    if was_playing {
+        broadcast_playback_command(
+            &state,
+            group_id,
+            item_id,
+            position,
+            members,
+            "Waiting",
+            "Seek",
+            now,
+        );
+    } else {
+        broadcast_playback_command(
+            &state,
+            group_id,
+            item_id,
+            position,
+            members,
+            "Paused",
+            "Pause",
+            now,
+        );
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
