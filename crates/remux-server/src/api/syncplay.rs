@@ -487,6 +487,16 @@ pub async fn join_group(
     let device_id = session.device.id.clone();
     let group_id = info.group_id;
 
+    tracing::info!(
+        %group_id,
+        %device_id,
+        group_state = %info.state,
+        queue_present = queue.is_some(),
+        playing_index = ?queue.as_ref().map(|q| q.playing_index),
+        position_ticks = ?queue.as_ref().map(|q| q.position_ticks),
+        "SyncPlay join snapshot"
+    );
+
     let _ = state.ctx.ws_tx.send(WsEvent::SyncPlayGroupUpdate {
         device_id: device_id.clone(),
         data: json!({
