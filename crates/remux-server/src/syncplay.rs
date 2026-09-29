@@ -500,6 +500,51 @@ impl SyncPlayManager {
 		group.pending_catchup.remove(device_id);
 		Some((group_id, current_id, target_ticks))
 	}
+	
+	/// Start one wait cycle when a member buffers the current playing item.
+	pub fn buffering(
+		&self,
+		device_id: &str,
+		playlist_item_id: &str,
+		now: chrono::DateTime<chrono::Utc>,
+	) -> Result<Option<(Uuid, Uuid, i64, Vec<String>)>, &'static str> {
+		let reported_id = Uuid::parse_str(playlist_item_id)
+			.map_err(|_| "invalid playlist item ID")?;
+
+		let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+		let group_id = *inner
+			.device_groups
+			.get(device_id)
+			.ok_or("device is not in a SyncPlay group")?;
+		let group = inner.groups.get_mut(&group_id).ok_or("group not found")?;
+		let queue = group.queue.as_ref().ok_or("group has no queue")?;
+
+		let current_id = queue.playlist_item_ids[queue.playing_index];
+		if reported_id != current_id {
+			return Err("buffering report refers to a different item");
+		}
+
+		// Repeated buffering reports must not restart the same wait cycle.
+		if group.state != "Playing" {
+			return Ok(None);
+		}
+
+		let queue = group.queue.as_mut().ok_or("group has no queue")?;
+		if let Some(started_at) = group.play_started_at {
+			let elapsed_ms = (now - started_at).num_milliseconds().max(0);
+			queue.position_ticks = queue
+				.position_ticks
+				.saturating_add(elapsed_ms.saturating_mul(10_000));
+		}
+
+		let position_ticks = queue.position_ticks;
+		group.play_started_at = None;
+		group.ready_members.clear();
+		group.state = "Waiting".to_owned();
+
+		let members = group.members.iter().cloned().collect();
+		Ok(Some((group_id, current_id, position_ticks, members)))
+	}
 
 }
 
@@ -770,4 +815,49 @@ mod tests {
 			.take_join_catchup("host", &item_id.to_string(), when)
 			.is_none());
 	}
+	
+	#[test]
+fn buffering_waits_once_and_rejects_an_old_item() {
+    let manager = SyncPlayManager::new();
+    let group = manager.create("host", "Test".to_owned());
+    manager.join("friend", group.group_id).unwrap();
+
+    let (_, queue) = manager
+        .set_new_queue("host", vec![Uuid::new_v4()], 0, 10_000)
+        .unwrap();
+    let item = queue.playlist_item_ids[0];
+
+    manager.mark_ready("host", &item.to_string()).unwrap();
+    manager.mark_ready("friend", &item.to_string()).unwrap();
+
+    let start = chrono::Utc::now();
+    manager.record_play_start(group.group_id, item, start).unwrap();
+
+    let now = start + chrono::Duration::seconds(5);
+    assert!(manager
+        .buffering("outsider", &item.to_string(), now)
+        .is_err());
+    assert!(manager
+        .buffering("host", &Uuid::new_v4().to_string(), now)
+        .is_err());
+
+    let (_, _, position, members) = manager
+        .buffering("host", &item.to_string(), now)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(position, 50_010_000);
+    assert_eq!(members.len(), 2);
+    assert_eq!(manager.get(group.group_id).unwrap().state, "Waiting");
+    assert!(manager
+        .buffering("host", &item.to_string(), now)
+        .unwrap()
+        .is_none());
+
+    assert_eq!(manager.mark_ready("host", &item.to_string()).unwrap(), None);
+    assert!(manager
+        .mark_ready("friend", &item.to_string())
+        .unwrap()
+        .is_some());
+}
 }

@@ -55,6 +55,18 @@ pub struct PlaylistItemRequest {
     playlist_item_id: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct BufferingRequest {
+    playlist_item_id: String,
+    #[serde(default)]
+    _when: Option<String>,
+    #[serde(default)]
+    _position_ticks: Option<i64>,
+    #[serde(default)]
+    _is_playing: Option<bool>,
+}
+
 fn broadcast_playback_command(
     state: &AppState,
     group_id: Uuid,
@@ -152,6 +164,51 @@ fn change_playlist_item(
     }
 
     StatusCode::NO_CONTENT
+}
+
+#[post("/syncplay/buffering")]
+pub async fn buffering(
+    State(state): State<AppState>,
+    session: auth::AuthSession,
+    Json(body): Json<BufferingRequest>,
+) -> Result<StatusCode> {
+    let now = chrono::Utc::now();
+
+    match state
+        .ctx
+        .syncplay
+        .buffering(&session.device.id, &body.playlist_item_id, now)
+    {
+        Ok(Some((group_id, item_id, position, members))) => {
+            tracing::info!(
+                %group_id,
+                device_id = %session.device.id,
+                position_ticks = position,
+                "SyncPlay buffering: waiting for group"
+            );
+
+            broadcast_playback_command(
+                &state,
+                group_id,
+                item_id,
+                position,
+                members,
+                "Waiting",
+                "Seek",
+                now,
+            );
+            Ok(StatusCode::NO_CONTENT)
+        }
+        Ok(None) => Ok(StatusCode::NO_CONTENT),
+        Err(reason) => {
+            tracing::warn!(
+                device_id = %session.device.id,
+                %reason,
+                "SyncPlay Buffering rejected"
+            );
+            Ok(StatusCode::BAD_REQUEST)
+        }
+    }
 }
 
 #[post("/syncplay/nextitem")]
