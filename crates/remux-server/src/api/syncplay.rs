@@ -531,20 +531,6 @@ pub async fn join_group(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[post("/syncplay/join")]
-pub async fn join_group(
-    State(state): State<AppState>,
-    session: auth::AuthSession,
-    Json(body): Json<JoinGroupRequest>,
-) -> Result<StatusCode> {
-    state
-        .ctx
-        .syncplay
-        .join(&session.device.id, body.group_id)
-        .context_not_found("SyncPlay group not found")?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
 #[post("/syncplay/leave")]
 pub async fn leave_group(
     State(state): State<AppState>,
