@@ -1116,7 +1116,7 @@ async fn videos_stream_inner(
     headers: headers::HeaderMap,
     state: AppState,
     user_id: Option<Uuid>,
-    auth_device_id: Option<string>,
+    auth_device_id: Option<String>,
     id: Uuid,
     q: api::VideoStreamQuery,
 ) -> Result<impl IntoResponse> {
