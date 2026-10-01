@@ -496,6 +496,12 @@ pub async fn set_new_queue(
     let selection = state.ctx.store.get::<Uuid>(&format!(
         "syncplay:selected:{}:{}:{}", session.user.id, session.device.id, playing_item
     ));
+	tracing::info!(
+		device_id = %session.device.id,
+		item_id = %playing_item,
+		cached_selection = ?selection,
+		"SyncPlay queue selection lookup"
+	);
     let pinned = if let Some(selected) = selection.filter(|&sid| sid != playing_item) {
         // Revalidate the choice against the current user's filtered source list.
         let detail = crate::api::items::item(
@@ -528,6 +534,12 @@ pub async fn set_new_queue(
     } else {
         None // Auto or no dropdown choice: preserve ordinary SyncPlay behavior.
     };
+	tracing::info!(
+		device_id = %session.device.id,
+		item_id = %playing_item,
+		resolved_pin = ?pinned,
+		"SyncPlay queue pin"
+	);
     match state.ctx.syncplay.set_new_queue(
         &session.device.id,
         body.playing_queue,

@@ -1306,6 +1306,12 @@ pub async fn users_items_get(
 ) -> Result<impl IntoResponse> {
     let result = item(state.clone(), session.clone(), id, q.fields.as_deref())
         .await?
+		tracing::info!(
+			device_id = %session.device.id,
+			item_id = %id,
+			parsed_selection = ?q.media_source_id,
+			"SyncPlay selection capture"
+		);
         .context_not_found("item not found")?;
     if let Some(selected) = q.media_source_id {
         let allowed = result.media_sources.as_ref().is_some_and(|sources| {
