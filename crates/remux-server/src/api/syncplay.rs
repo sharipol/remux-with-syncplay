@@ -493,9 +493,14 @@ pub async fn set_new_queue(
     let Some(&playing_item) = body.playing_queue.get(body.playing_item_position) else {
         return Ok(StatusCode::BAD_REQUEST);
     };
-    let selection = state.ctx.store.get::<Uuid>(&format!(
-        "syncplay:selected:{}:{}:{}", session.user.id, session.device.id, playing_item
-    ));
+    let selection: Option<Uuid> = state.ctx.store
+		.get::<Uuid>(&format!(
+			"syncplay:selected:{}:{}:{}",
+			session.user.id,
+			session.device.id,
+			playing_item,
+		))
+		.map(|id| *id);
 	tracing::info!(
 		device_id = %session.device.id,
 		item_id = %playing_item,

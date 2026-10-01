@@ -938,7 +938,7 @@ pub async fn items_file(
         headers,
         state,
         Some(session.user.id),
-        Some(&session.device.id),
+        Some(session.device.id.clone()),
         id,
         q,
     )
@@ -999,7 +999,7 @@ pub async fn audio_stream(
 ) -> Result<impl IntoResponse> {
     let auth_device_id = best_effort_device_id(&state, &jfauth).await;
     let user_id = best_effort_user_id(&state, &jfauth).await;
-    videos_stream_inner(headers, state, user_id, auth_device_id.as_deref(), id, q).await
+    videos_stream_inner(headers, state, user_id, auth_device_id, id, q).await
 }
 
 #[get("/audio/{id}/stream.{container}")]
@@ -1017,7 +1017,7 @@ pub async fn audio_stream_by_container(
     }
     let auth_device_id = best_effort_device_id(&state, &jfauth).await;
     let user_id = best_effort_user_id(&state, &jfauth).await;
-    videos_stream_inner(headers, state, user_id, auth_device_id.as_deref(), id, q).await
+    videos_stream_inner(headers, state, user_id, auth_device_id, id, q).await
 }
 
 #[get("/videos/{id}/stream")]
@@ -1030,7 +1030,7 @@ pub async fn videos_stream(
 ) -> Result<impl IntoResponse> {
     let auth_device_id = best_effort_device_id(&state, &jfauth).await;
     let user_id = best_effort_user_id(&state, &jfauth).await;
-    videos_stream_inner(headers, state, user_id, auth_device_id.as_deref(), id, q).await
+    videos_stream_inner(headers, state, user_id, auth_device_id, id, q).await
 }
 
 #[get("/videos/{id}/stream.{container}")]
@@ -1048,7 +1048,7 @@ pub async fn videos_stream_by_container(
     }
     let auth_device_id = best_effort_device_id(&state, &jfauth).await;
     let user_id = best_effort_user_id(&state, &jfauth).await;
-    videos_stream_inner(headers, state, user_id, auth_device_id.as_deref(), id, q).await
+    videos_stream_inner(headers, state, user_id, auth_device_id, id, q).await
 }
 
 fn ext_from_descriptor(descriptor: &crate::stream::StreamDescriptor) -> String {
@@ -1116,7 +1116,7 @@ async fn videos_stream_inner(
     headers: headers::HeaderMap,
     state: AppState,
     user_id: Option<Uuid>,
-    auth_device_id: Option<&str>,
+    auth_device_id: Option<string>,
     id: Uuid,
     q: api::VideoStreamQuery,
 ) -> Result<impl IntoResponse> {
@@ -1144,12 +1144,18 @@ async fn videos_stream_inner(
             )
         });
     let pinned = auth_device_id
-        .and_then(|device| state.ctx.syncplay.pinned_stream_for_device(device, id));
+		.as_deref()
+		.and_then(|device| state.ctx.syncplay.pinned_stream_for_device(device, id));
     let requested_id = pinned.or(probe_fallback).or(q.media_source_id);
     let media = StreamService::lookup(
-        &state.ctx, id, requested_id, auth_device_id, user_id,
-    ).await;
-    if let (Some(expected), Ok(ref actual)) = (pinned, &media) {
+		&state.ctx,
+		id,
+		requested_id,
+		auth_device_id.as_deref(),
+		user_id,
+	)
+	.await;
+    if let (Some(expected), Ok(actual)) = (pinned, &media) {
         if actual.id != expected {
             return Err(anyhow!("SyncPlay resolved a different file than the pinned stream").into());
         }
