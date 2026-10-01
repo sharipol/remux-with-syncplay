@@ -1301,21 +1301,28 @@ pub async fn users_get_by_id(
 pub async fn users_items_get(
     State(state): State<AppState>,
     session: auth::AuthSession,
-    Path((user_id, id)): Path<(Uuid, Uuid)>,
+    Path((_user_id, id)): Path<(Uuid, Uuid)>,
     Query(q): Query<api::GetItemsQuery>,
 ) -> Result<impl IntoResponse> {
-    return Ok(Json(
-        item(
-            state,
-            session,
-            id,
-            q.fields
-                .as_deref(),
-        )
+    let result = item(state.clone(), session.clone(), id, q.fields.as_deref())
         .await?
-        .context_not_found("item not found")?,
-    )
-    .into_response());
+        .context_not_found("item not found")?;
+    if let Some(selected) = q.media_source_id {
+        let allowed = result.media_sources.as_ref().is_some_and(|sources| {
+            !sources.is_empty()
+                && (selected == id || sources.iter().any(|s| s.id == selected))
+        });
+        if allowed {
+            state.ctx.store.save(
+                format!("syncplay:selected:{}:{}:{}", session.user.id, session.device.id, id),
+                selected,
+                std::time::Duration::from_secs(30 * 60),
+            );
+        } else {
+            tracing::warn!(item_id = %id, source_id = %selected, "ignored invalid detail source");
+        }
+    }
+    Ok(Json(result).into_response())
 }
 
 #[get("/users/{user_id}/items")]

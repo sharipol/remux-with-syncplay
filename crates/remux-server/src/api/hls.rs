@@ -40,6 +40,7 @@ async fn create_hls_session(
     id: Uuid,
     q: &api::HlsVideoQuery,
 ) -> Result<(Arc<tokio::sync::RwLock<TranscodeSession>>, String)> {
+	let pinned = state.ctx.syncplay.pinned_stream_for_device(&auth.device.id, id);
     let play_session_id = q
         .play_session_id
         .clone()
@@ -128,12 +129,15 @@ async fn create_hls_session(
         .sessions
         .get_transcode(&play_session_id)
     {
+		        if let Some(expected) = pinned {
+            if existing.read().await.media_source_id != expected {
+                return Err(anyhow::anyhow!("HLS session uses a different SyncPlay source").into());
+            }
+        }
         existing
     } else {
         // Fetch media info to get the stream URL
-        let media_source_id = q
-            .media_source_id
-            .unwrap_or(id);
+        let media_source_id = pinned.or(q.media_source_id).unwrap_or(id);
         let media = db::Media::get_by_id(
             &state
                 .ctx
@@ -170,7 +174,7 @@ async fn create_hls_session(
                         .db,
                 )
                 .await?;
-            resolved_media = if let Some(wanted) = q.media_source_id {
+            resolved_media = if let Some(wanted) = pinned.or(q.media_source_id) {
                 sources
                     .iter()
                     .find(|s| s.id == wanted)
@@ -197,7 +201,13 @@ async fn create_hls_session(
                 .next()
                 .context_not_found("no stream found for track")?;
         }
-
+		
+		if let Some(expected) = pinned {
+            if resolved_media.id != expected {
+                return Err(anyhow::anyhow!("HLS source differs from SyncPlay pin").into());
+           }
+        }
+		
         if let Some(crate::stream::StreamInfo {
             descriptor: crate::stream::StreamDescriptor::Torrent { info_hash, .. },
             ..

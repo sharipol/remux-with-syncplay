@@ -490,6 +490,44 @@ pub async fn set_new_queue(
     session: auth::AuthSession,
     Json(body): Json<SetNewQueueRequest>,
 ) -> Result<StatusCode> {
+    let Some(&playing_item) = body.playing_queue.get(body.playing_item_position) else {
+        return Ok(StatusCode::BAD_REQUEST);
+    };
+    let selection = state.ctx.store.get::<Uuid>(&format!(
+        "syncplay:selected:{}:{}:{}", session.user.id, session.device.id, playing_item
+    ));
+    let pinned = if let Some(selected) = selection.filter(|&sid| sid != playing_item) {
+        // Revalidate the choice against the current user's filtered source list.
+        let detail = crate::api::items::item(
+            state.clone(), session.clone(), playing_item, None,
+        ).await?;
+        if !detail.as_ref().and_then(|d| d.media_sources.as_ref())
+            .is_some_and(|sources| sources.iter().any(|s| s.id == selected)) {
+            return Ok(StatusCode::CONFLICT);
+        }
+        let media = crate::services::MediaResolveService::resolve_item(selected, &state.ctx)
+            .await?;
+        let Some(media) = media else { return Ok(StatusCode::CONFLICT); };
+        let settings = crate::db::Settings::get_config_or_default(&state.ctx.db).await;
+        let mut service = crate::services::StreamService::new(
+            crate::services::StreamServiceConfig {
+                ctx: state.ctx.clone(),
+                item_id: playing_item,
+                requested_id: Some(selected),
+                show_ungrouped: settings.stream_groups_show_ungrouped.unwrap_or(true),
+                stream_filter: session.user.policy.as_ref().and_then(|p| p.stream_filter.clone()),
+                user_id: Some(session.user.id),
+            },
+        );
+        service.load(media).await?;
+        let probed = service.probe_candidates().await?;
+        let Some(result) = probed.results.first() else {
+            return Ok(StatusCode::CONFLICT);
+        };
+        Some(result.effective_stream.id)
+    } else {
+        None // Auto or no dropdown choice: preserve ordinary SyncPlay behavior.
+    };
     match state.ctx.syncplay.set_new_queue(
         &session.device.id,
         body.playing_queue,
@@ -497,6 +535,16 @@ pub async fn set_new_queue(
         body.start_position_ticks,
     ) {
         Ok((group_id, queue)) => {
+            if let Some(stream_id) = pinned {
+                if state.ctx.syncplay.pin_current_stream(
+                    &session.device.id,
+                    queue.playlist_item_ids[queue.playing_index],
+                    stream_id,
+                ).is_err() {
+                    return Ok(StatusCode::CONFLICT);
+                }
+            }
+
 			let playlist: Vec<_> = queue
 				.item_ids
 				.iter()

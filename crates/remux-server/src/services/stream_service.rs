@@ -52,6 +52,7 @@ pub(crate) struct StreamService {
     group: Option<(Uuid, String, Vec<db::Media>)>,
     stream: Option<db::Media>,
     pub streams: Vec<db::Media>,
+    exact_stream_id: Option<Uuid>,
 }
 
 fn quality_ordered_probe_pool(streams: &[db::Media]) -> Vec<db::Media> {
@@ -72,7 +73,13 @@ impl StreamService {
             group: None,
             stream: None,
             streams: vec![],
+            exact_stream_id: None,
         }
+    }
+
+    /// Only for a server-validated SyncPlay pin; never take this from a client query.
+    pub fn require_exact_stream(&mut self, stream_id: Uuid) {
+        self.exact_stream_id = Some(stream_id);
     }
 
     /// Load the service from a pre-fetched media item (playbackinfo path).
@@ -142,6 +149,7 @@ impl StreamService {
             db_streams
         };
 
+        let raw_streams = raw.clone();
         let streams = db::StreamGroup::filter_sources(
             &self
                 .ctx
@@ -182,6 +190,28 @@ impl StreamService {
         };
 
         if streams.is_empty() {
+            return Ok(());
+        }
+        if let Some(exact_id) = self.exact_stream_id {
+            let exact = raw_streams.iter().find(|s| s.id == exact_id).cloned()
+                .ok_or_else(|| anyhow::anyhow!("pinned stream is no longer available"))?;
+            let mut allowed = streams.iter().any(|s| s.id == exact_id);
+            if !allowed {
+                for gid in streams.iter().filter_map(|s| s.group_id) {
+                    if db::StreamGroup::streams_for(&self.ctx.db, &gid, &self.item_id)
+                        .await?
+                        .iter()
+                        .any(|s| s.id == exact_id) {
+                        allowed = true;
+                        break;
+                    }
+                }
+            }
+            if !allowed {
+                return Err(anyhow::anyhow!("pinned stream is not allowed for this item"));
+            }
+            self.stream = Some(exact.clone());
+            self.streams = vec![exact];
             return Ok(());
         }
         self.stream = streams
@@ -396,6 +426,17 @@ impl StreamService {
                             .any(|s| s.id == sid)
                 })
                 .unwrap_or(false);
+
+        if let Some(exact_id) = self.exact_stream_id {
+            let candidates: Vec<_> = all_streams.into_iter()
+                .filter(|s| s.id == exact_id).collect();
+            return StreamSelection {
+                probe_pool: candidates.clone(), candidates,
+                restrict_resolution: true,
+                preferred_probe_id: None,
+                specific_requested: true,
+            };
+        }
 
         if self
             .group
@@ -666,6 +707,9 @@ impl StreamService {
                 }
             }
 
+            if self.exact_stream_id.is_some_and(|id| effective_stream.id != id) {
+                return Err(anyhow::anyhow!("pinned stream probe changed the file"));
+            }
             results.push(ProbeResult {
                 source,
                 stream,

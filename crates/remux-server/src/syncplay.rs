@@ -21,6 +21,7 @@ pub struct GroupQueue {
 	pub playlist_item_ids: Vec<Uuid>,
     pub playing_index: usize,
     pub position_ticks: i64,
+    pub pinned_stream_id: Option<Uuid>,
 }
 
 #[derive(Debug)]
@@ -187,6 +188,7 @@ impl SyncPlayManager {
 			playlist_item_ids,
 			playing_index,
 			position_ticks,
+            pinned_stream_id: None,
 		};
 		group.queue = Some(queue.clone());
 		group.state = "Waiting".to_owned();
@@ -197,6 +199,31 @@ impl SyncPlayManager {
 
 		Ok((group_id, queue))
 	}
+
+    /// Atomically install the resolved file for the current queue item.
+    pub fn pin_current_stream(
+        &self, device_id: &str, playlist_item_id: Uuid, stream_id: Uuid,
+    ) -> Result<(), &'static str> {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let group_id = *inner.device_groups.get(device_id).ok_or("not in a group")?;
+        let group = inner.groups.get_mut(&group_id).ok_or("group not found")?;
+        let queue = group.queue.as_mut().ok_or("group has no queue")?;
+        if queue.playlist_item_ids.get(queue.playing_index).copied() != Some(playlist_item_id)
+            || group.state != "Waiting"
+        {
+            return Err("queue changed while source was resolving");
+        }
+        queue.pinned_stream_id = Some(stream_id);
+        Ok(())
+    }
+
+    pub fn pinned_stream_for_device(&self, device_id: &str, item_id: Uuid) -> Option<Uuid> {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let group_id = inner.device_groups.get(device_id)?;
+        let queue = inner.groups.get(group_id)?.queue.as_ref()?;
+        (queue.item_ids.get(queue.playing_index).copied() == Some(item_id))
+            .then_some(queue.pinned_stream_id).flatten()
+    }
 
 	pub fn queue_for_device(&self, device_id: &str) -> Option<(Uuid, GroupQueue)> {
 		let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -424,6 +451,7 @@ impl SyncPlayManager {
 		};
 
 		queue.playing_index = next_index;
+        queue.pinned_stream_id = None;
 		queue.position_ticks = 0;
 		let updated_queue = queue.clone();
 

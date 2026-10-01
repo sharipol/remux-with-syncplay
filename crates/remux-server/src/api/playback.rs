@@ -190,6 +190,11 @@ async fn items_playbackinfo_inner(
     id: Uuid,
     q: api::PlaybackInfoQuery,
 ) -> Result<impl IntoResponse> {
+    let pinned = state.ctx.syncplay.pinned_stream_for_device(&session.device.id, id);
+    let mut q = q;
+    if let Some(stream_id) = pinned {
+        q.media_source_id = Some(stream_id);
+    }
     let media_source_id = q.media_source_id;
 
     trace!(?id, ?q, "items_playbackinfo");
@@ -306,6 +311,7 @@ async fn items_playbackinfo_inner(
                 .id,
         ),
     });
+    if let Some(stream_id) = pinned { service.require_exact_stream(stream_id); }
     let is_live = media.is_live();
     let is_track_item = media.is_track();
     let selected_source_language = media
@@ -931,11 +937,8 @@ pub async fn items_file(
     let mut response = videos_stream_inner(
         headers,
         state,
-        Some(
-            session
-                .user
-                .id,
-        ),
+        Some(session.user.id),
+        Some(&session.device.id),
         id,
         q,
     )
@@ -957,6 +960,15 @@ pub async fn items_file(
 /// `Token` is present (never rejecting the request) so per-user cache
 /// scoping (e.g. `recent_probe_fallback`) still works when a valid token
 /// happens to be there.
+async fn best_effort_device_id(
+    state: &AppState,
+    jfauth: &auth::JellyfinAuthHeader,
+) -> Option<String> {
+    let token = jfauth.token.as_deref()?;
+    auth::Device::get_by_access_token(&state.ctx.db, token)
+        .await.ok().flatten().map(|d| d.id)
+}
+
 async fn best_effort_user_id(
     state: &AppState,
     jfauth: &auth::JellyfinAuthHeader,
@@ -985,8 +997,9 @@ pub async fn audio_stream(
     Path(id): Path<Uuid>,
     Query(q): Query<api::VideoStreamQuery>,
 ) -> Result<impl IntoResponse> {
+    let auth_device_id = best_effort_device_id(&state, &jfauth).await;
     let user_id = best_effort_user_id(&state, &jfauth).await;
-    videos_stream_inner(headers, state, user_id, id, q).await
+    videos_stream_inner(headers, state, user_id, auth_device_id.as_deref(), id, q).await
 }
 
 #[get("/audio/{id}/stream.{container}")]
@@ -1002,8 +1015,9 @@ pub async fn audio_stream_by_container(
     {
         q.container = Some(container);
     }
+    let auth_device_id = best_effort_device_id(&state, &jfauth).await;
     let user_id = best_effort_user_id(&state, &jfauth).await;
-    videos_stream_inner(headers, state, user_id, id, q).await
+    videos_stream_inner(headers, state, user_id, auth_device_id.as_deref(), id, q).await
 }
 
 #[get("/videos/{id}/stream")]
@@ -1014,8 +1028,9 @@ pub async fn videos_stream(
     Path(id): Path<Uuid>,
     Query(q): Query<api::VideoStreamQuery>,
 ) -> Result<impl IntoResponse> {
+    let auth_device_id = best_effort_device_id(&state, &jfauth).await;
     let user_id = best_effort_user_id(&state, &jfauth).await;
-    videos_stream_inner(headers, state, user_id, id, q).await
+    videos_stream_inner(headers, state, user_id, auth_device_id.as_deref(), id, q).await
 }
 
 #[get("/videos/{id}/stream.{container}")]
@@ -1031,8 +1046,9 @@ pub async fn videos_stream_by_container(
     {
         q.container = Some(container);
     }
+    let auth_device_id = best_effort_device_id(&state, &jfauth).await;
     let user_id = best_effort_user_id(&state, &jfauth).await;
-    videos_stream_inner(headers, state, user_id, id, q).await
+    videos_stream_inner(headers, state, user_id, auth_device_id.as_deref(), id, q).await
 }
 
 fn ext_from_descriptor(descriptor: &crate::stream::StreamDescriptor) -> String {
@@ -1100,6 +1116,7 @@ async fn videos_stream_inner(
     headers: headers::HeaderMap,
     state: AppState,
     user_id: Option<Uuid>,
+    auth_device_id: Option<&str>,
     id: Uuid,
     q: api::VideoStreamQuery,
 ) -> Result<impl IntoResponse> {
@@ -1126,22 +1143,26 @@ async fn videos_stream_inner(
                     .unwrap_or(id),
             )
         });
-    let requested_id = probe_fallback.or(q.media_source_id);
+    let pinned = auth_device_id
+        .and_then(|device| state.ctx.syncplay.pinned_stream_for_device(device, id));
+    let requested_id = pinned.or(probe_fallback).or(q.media_source_id);
     let media = StreamService::lookup(
-        &state.ctx,
-        id,
-        requested_id,
-        q.device_id
-            .as_deref(),
-        user_id,
-    )
-    .await;
+        &state.ctx, id, requested_id, auth_device_id, user_id,
+    ).await;
+    if let (Some(expected), Ok(ref actual)) = (pinned, &media) {
+        if actual.id != expected {
+            return Err(anyhow!("SyncPlay resolved a different file than the pinned stream").into());
+        }
+    }
 
     // Both fallthroughs serve the no-streams placeholder with HTTP 200 (the
     // client plays a blank clip). Log why, or the failure is invisible.
     let media = match media {
         Ok(m) => m,
         Err(e) => {
+            if pinned.is_some() {
+                return Err(anyhow!("pinned SyncPlay source unavailable: {e:#}").into());
+            }
             tracing::warn!(
                 item = %id,
                 media_source = ?q.media_source_id,

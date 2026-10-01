@@ -1517,6 +1517,8 @@ pub struct SpecialViewOptionDto {
 #[derive(default2::Default, Debug, Serialize, Deserialize, Clone)]
 #[skip_serializing_none]
 pub struct GetItemsQuery {
+    #[serde(rename = "mediaSourceId", alias = "MediaSourceId", alias = "media_source_id")]
+    pub media_source_id: Option<Uuid>,
     pub user_id: Option<Uuid>,
     pub max_official_rating: Option<String>,
     #[serde(default, deserialize_with = "deserialize_option_bool_from_anything")]
